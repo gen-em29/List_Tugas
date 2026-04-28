@@ -1,0 +1,420 @@
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, collection, addDoc, onSnapshot, 
+  updateDoc, doc, deleteDoc, query, orderBy 
+} from 'firebase/firestore';
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { 
+  CheckCircle2, Circle, Trash2, Plus, Search, Star, 
+  Calendar, Trophy, StickyNote, ChevronRight, Menu, X,
+  Clock, ArrowRight, Sparkles, Zap, Timer, Bell, 
+  FileText, BarChart3, Settings, Moon, Sun
+} from 'lucide-react';
+
+// Firebase Config
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'gen-yus-app-v2';
+
+// --- Komponen Pendukung (Dioptimalkan) ---
+const TaskItem = React.memo(({ task, onToggle, onDelete }) => {
+  const isOverdue = task.deadline && new Date(task.deadline) < new Date() && !task.completed;
+  const isClose = task.deadline && !task.completed && 
+                 (new Date(task.deadline) - new Date() < 86400000) && 
+                 (new Date(task.deadline) - new Date() > 0);
+
+  return (
+    <div className={`group bg-white p-5 rounded-[1.8rem] border transition-all duration-300 hover:shadow-xl hover:shadow-indigo-500/10 
+      ${task.completed ? 'border-gray-100 opacity-60' : isOverdue ? 'border-red-200 bg-red-50/30' : 'border-gray-50'}`}>
+      <div className="flex items-start gap-4">
+        <button onClick={() => onToggle(task)} className="mt-1 transition-transform active:scale-90">
+          {task.completed ? <CheckCircle2 className="text-green-500" size={24} /> : <Circle className="text-gray-300 group-hover:text-indigo-500" size={24} />}
+        </button>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h3 className={`font-bold text-lg leading-tight truncate ${task.completed ? 'line-through text-gray-400' : 'text-gray-800'}`}>
+              {task.text}
+            </h3>
+            {task.important && <span className="bg-amber-100 text-amber-600 text-[9px] px-2 py-0.5 rounded-full font-black uppercase tracking-tighter">Penting</span>}
+          </div>
+          
+          {task.note && (
+            <p className="text-gray-500 text-sm mt-1 line-clamp-2 italic font-medium">
+              "{task.note}"
+            </p>
+          )}
+
+          <div className="flex flex-wrap gap-3 mt-3">
+            {task.deadline && (
+              <div className={`flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest px-2 py-1 rounded-lg
+                ${isOverdue ? 'bg-red-100 text-red-600' : isClose ? 'bg-orange-100 text-orange-600 animate-pulse' : 'bg-gray-100 text-gray-400'}`}>
+                <Clock size={12} /> {new Date(task.deadline).toLocaleString('id-ID', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+              </div>
+            )}
+          </div>
+        </div>
+        <button onClick={() => onDelete(task.id)} className="opacity-0 group-hover:opacity-100 p-2 text-gray-300 hover:text-red-500 transition-all">
+          <Trash2 size={20} />
+        </button>
+      </div>
+    </div>
+  );
+});
+
+export default function App() {
+  const [currentPage, setCurrentPage] = useState('landing');
+  const [user, setUser] = useState(null);
+  const [tasks, setTasks] = useState([]);
+  const [activeMenu, setActiveMenu] = useState('tugas');
+  const [filter, setFilter] = useState('semua');
+  const [loading, setLoading] = useState(true);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+
+  // Modal & Input State
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [form, setForm] = useState({ text: '', note: '', deadline: '', important: false });
+
+  // Stats
+  const stats = useMemo(() => {
+    const completed = tasks.filter(t => t.completed).length;
+    const level = Math.floor(completed / 5) + 1;
+    const xp = (completed % 5) * 20;
+    return { completed, level, xp };
+  }, [tasks]);
+
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        await signInAnonymously(auth);
+      } catch (e) { console.error(e); }
+    };
+    initAuth();
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setLoading(false);
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const q = query(collection(db, 'artifacts', appId, 'users', user.uid, 'tasks'));
+    const unsub = onSnapshot(q, (snap) => {
+      setTasks(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (err) => console.error(err));
+    return unsub;
+  }, [user]);
+
+  const addTask = async (e) => {
+    e.preventDefault();
+    if (!form.text.trim() || !user) return;
+    await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'tasks'), {
+      ...form,
+      completed: false,
+      createdAt: new Date().toISOString()
+    });
+    setForm({ text: '', note: '', deadline: '', important: false });
+    setShowAddModal(false);
+  };
+
+  const toggleTask = useCallback(async (task) => {
+    await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', task.id), {
+      completed: !task.completed
+    });
+  }, [user]);
+
+  const deleteTask = useCallback(async (id) => {
+    await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', id));
+  }, [user]);
+
+  const filteredTasks = useMemo(() => {
+    return tasks.filter(t => {
+      const match = t.text.toLowerCase().includes(searchTerm.toLowerCase());
+      if (!match) return false;
+      if (filter === 'penting') return t.important;
+      if (filter === 'selesai') return t.completed;
+      if (filter === 'proses') return !t.completed;
+      return true;
+    }).sort((a, b) => b.important - a.important);
+  }, [tasks, filter, searchTerm]);
+
+  if (loading) return (
+    <div className="h-screen bg-white flex flex-col items-center justify-center">
+      <div className="w-12 h-12 border-4 border-indigo-100 border-t-indigo-600 rounded-full animate-spin mb-4"></div>
+      <p className="text-xs font-black text-indigo-600 tracking-[0.3em] uppercase">Gen Yus App Loading</p>
+    </div>
+  );
+
+  if (currentPage === 'landing') {
+    return (
+      <div className="min-h-screen bg-white flex flex-col">
+        <nav className="p-8 flex justify-between items-center max-w-7xl mx-auto w-full">
+          <div className="flex items-center gap-2">
+            <Zap className="text-indigo-600" fill="currentColor" />
+            <span className="font-black text-xl tracking-tighter uppercase">Gen Yus</span>
+          </div>
+          <button onClick={() => setCurrentPage('dashboard')} className="font-bold text-sm bg-gray-50 px-5 py-2 rounded-xl">Login</button>
+        </nav>
+        
+        <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
+          <div className="w-20 h-20 bg-indigo-50 rounded-[2.5rem] flex items-center justify-center text-indigo-600 mb-8 animate-pulse shadow-2xl shadow-indigo-100">
+            <Rocket size={40} />
+          </div>
+          <h1 className="text-5xl md:text-7xl font-black text-gray-900 mb-6 tracking-tight leading-[0.9]">
+            SIAP UNTUK <br/><span className="text-indigo-600">PRODUKTIF?</span>
+          </h1>
+          <p className="text-gray-400 max-w-md mb-12 font-medium text-lg leading-relaxed">
+            Gen Yus App v2.0 hadir dengan fitur catatan detail, deadline presisi, dan performa super kilat.
+          </p>
+          <button 
+            onClick={() => setCurrentPage('dashboard')}
+            className="group bg-indigo-600 text-white px-12 py-6 rounded-[2rem] font-black text-xl flex items-center gap-4 hover:bg-indigo-700 transition-all shadow-2xl shadow-indigo-200"
+          >
+            MASUK DASHBOARD <ArrowRight className="group-hover:translate-x-2 transition-transform" />
+          </button>
+        </div>
+        <footer className="p-8 text-center text-[10px] font-bold text-gray-300 uppercase tracking-widest">
+          Gen Yus Productivity Suite • 2024
+        </footer>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#F8FAFC] text-slate-800 flex flex-col md:flex-row">
+      {/* Sidebar - Desktop */}
+      <aside className={`fixed md:relative z-50 h-screen w-80 bg-white border-r border-slate-100 transition-transform duration-500
+        ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0`}>
+        <div className="p-10 h-full flex flex-col">
+          <div className="flex items-center gap-3 mb-12">
+            <div className="p-2 bg-indigo-600 rounded-xl text-white shadow-lg shadow-indigo-100"><Zap size={20} fill="currentColor"/></div>
+            <h1 className="text-2xl font-black tracking-tighter">GEN YUS</h1>
+            <button className="md:hidden ml-auto" onClick={() => setIsSidebarOpen(false)}><X/></button>
+          </div>
+
+          <div className="mb-10 p-6 bg-slate-900 rounded-[2.5rem] text-white shadow-2xl shadow-slate-200 relative overflow-hidden group">
+            <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:scale-150 transition-transform"><Trophy size={80}/></div>
+            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-indigo-400 mb-1">Professional Lvl {stats.level}</p>
+            <h3 className="text-lg font-bold mb-4">{stats.completed} Agenda Selesai</h3>
+            <div className="w-full bg-white/10 h-2.5 rounded-full mb-2">
+              <div className="bg-indigo-500 h-full rounded-full transition-all duration-1000" style={{width: `${stats.xp}%`}}></div>
+            </div>
+            <p className="text-[9px] font-bold text-slate-500 uppercase">Progres Level Berikutnya</p>
+          </div>
+
+          <nav className="space-y-2 flex-1">
+            <MenuLink active={activeMenu === 'tugas'} onClick={() => setActiveMenu('tugas')} icon={<CheckCircle2 size={18}/>} label="Agenda Utama" />
+            <MenuLink active={activeMenu === 'fokus'} onClick={() => setActiveMenu('fokus')} icon={<Timer size={18}/>} label="Mode Fokus" />
+            <MenuLink active={activeMenu === 'stats'} onClick={() => setActiveMenu('stats')} icon={<BarChart3 size={18}/>} label="Insight Data" />
+          </nav>
+
+          <button onClick={() => setCurrentPage('landing')} className="flex items-center gap-3 p-5 text-slate-400 hover:text-red-500 font-bold text-sm transition-all">
+            <LogOut size={18}/> Logout
+          </button>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <main className="flex-1 overflow-y-auto h-screen p-6 md:p-14 relative scroll-smooth">
+        {/* Mobile Navbar */}
+        <div className="md:hidden flex items-center justify-between mb-8">
+           <button onClick={() => setIsSidebarOpen(true)} className="p-3 bg-white rounded-2xl shadow-sm border border-slate-100"><Menu size={20}/></button>
+           <h2 className="font-black text-sm uppercase tracking-widest">Gen Yus App</h2>
+           <div className="w-10 h-10 bg-indigo-600 rounded-2xl"></div>
+        </div>
+
+        <div className="max-w-4xl mx-auto">
+          {activeMenu === 'tugas' && (
+            <>
+              <header className="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-12">
+                <div>
+                  <h2 className="text-4xl font-black text-slate-900 tracking-tight mb-2">Daftar Agenda</h2>
+                  <p className="text-slate-400 font-bold uppercase text-[10px] tracking-[0.2em]">Manage your workflow with Gen Yus System</p>
+                </div>
+                <div className="flex gap-2">
+                  <div className="relative">
+                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+                    <input 
+                      type="text" placeholder="Cari agenda..." 
+                      className="pl-12 pr-6 py-4 bg-white border-none rounded-2xl shadow-sm focus:ring-4 focus:ring-indigo-500/5 text-sm w-full md:w-64"
+                      value={searchTerm} onChange={e => setSearchTerm(e.target.value)}
+                    />
+                  </div>
+                </div>
+              </header>
+
+              <div className="flex gap-3 mb-10 overflow-x-auto pb-2 scrollbar-hide">
+                <Tab active={filter === 'semua'} onClick={() => setFilter('semua')} label="Semua" count={tasks.length} />
+                <Tab active={filter === 'proses'} onClick={() => setFilter('proses')} label="Berjalan" count={tasks.filter(t => !t.completed).length} />
+                <Tab active={filter === 'penting'} onClick={() => setFilter('penting')} label="Prioritas" count={tasks.filter(t => t.important).length} />
+                <Tab active={filter === 'selesai'} onClick={() => setFilter('selesai')} label="Selesai" count={stats.completed} />
+              </div>
+
+              <div className="grid grid-cols-1 gap-4">
+                {filteredTasks.length > 0 ? (
+                  filteredTasks.map(task => (
+                    <TaskItem key={task.id} task={task} onToggle={toggleTask} onDelete={deleteTask} />
+                  ))
+                ) : (
+                  <div className="text-center py-24 bg-white rounded-[3rem] border border-dashed border-slate-200">
+                    <div className="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-6 text-slate-200"><FileText size={40}/></div>
+                    <p className="text-slate-400 font-black uppercase text-xs tracking-widest">Tidak ada agenda</p>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
+          {activeMenu === 'fokus' && (
+            <div className="flex flex-col items-center justify-center py-20 text-center animate-in fade-in duration-700">
+              <div className="relative w-72 h-72 flex items-center justify-center mb-12">
+                 <div className="absolute inset-0 border-[12px] border-indigo-50 rounded-full"></div>
+                 <div className="absolute inset-0 border-[12px] border-indigo-600 rounded-full" style={{clipPath: 'polygon(0 0, 100% 0, 100% 100%, 0 100%)', opacity: 0.1}}></div>
+                 <div className="text-6xl font-black text-slate-900 tracking-tighter">25:00</div>
+              </div>
+              <h2 className="text-3xl font-black mb-4">Mode Fokus Pomodoro</h2>
+              <p className="text-slate-400 max-w-sm mb-10 text-sm font-medium leading-relaxed">Fokus pada satu agenda selama 25 menit untuk hasil yang maksimal. Berani mencoba, Yus?</p>
+              <button className="bg-slate-900 text-white px-12 py-5 rounded-[2rem] font-black tracking-widest hover:bg-indigo-600 transition-all uppercase text-sm shadow-xl shadow-slate-200">
+                Mulai Fokus Sekarang
+              </button>
+            </div>
+          )}
+
+          {activeMenu === 'stats' && (
+             <div className="grid grid-cols-1 md:grid-cols-2 gap-8 animate-in slide-in-from-bottom-10 duration-500">
+                <div className="bg-white p-10 rounded-[3rem] border border-slate-100 shadow-sm">
+                  <h3 className="text-xl font-black mb-8 uppercase tracking-tighter">Aktivitas Mingguan</h3>
+                  <div className="flex items-end justify-between h-40 gap-2">
+                    {[40, 70, 45, 90, 65, 80, 30].map((h, i) => (
+                      <div key={i} className="flex-1 flex flex-col items-center gap-3">
+                        <div className="w-full bg-indigo-50 rounded-t-xl group relative cursor-pointer" style={{height: `${h}%`}}>
+                          <div className="absolute bottom-0 w-full bg-indigo-600 rounded-t-xl transition-all duration-1000 h-0 group-hover:h-full"></div>
+                        </div>
+                        <span className="text-[9px] font-bold text-slate-300 uppercase">{['S', 'S', 'R', 'K', 'J', 'S', 'M'][i]}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="bg-indigo-600 p-10 rounded-[3rem] text-white flex flex-col justify-between shadow-2xl shadow-indigo-100">
+                   <div>
+                     <h3 className="text-xl font-black mb-2 uppercase tracking-tighter">Satu Pesan Untukmu</h3>
+                     <p className="text-indigo-100/70 text-sm font-medium italic">"Kesuksesan bukan tentang seberapa cepat kamu berlari, tapi seberapa konsisten kamu melangkah."</p>
+                   </div>
+                   <div className="mt-12 flex items-center gap-4">
+                     <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center"><Sparkles/></div>
+                     <p className="text-xs font-black uppercase tracking-[0.2em]">Gen Yus Visionary</p>
+                   </div>
+                </div>
+             </div>
+          )}
+        </div>
+
+        {/* Floating Action */}
+        {activeMenu === 'tugas' && (
+          <button 
+            onClick={() => setShowAddModal(true)}
+            className="fixed bottom-12 right-12 w-20 h-20 bg-indigo-600 text-white rounded-[2rem] shadow-2xl shadow-indigo-300 flex items-center justify-center hover:scale-110 hover:rotate-12 transition-all active:scale-95 z-40"
+          >
+            <Plus size={36} />
+          </button>
+        )}
+      </main>
+
+      {/* Modal Tambah Agenda (v2.0 UI) */}
+      {showAddModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xl z-[100] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-2xl rounded-[3rem] p-10 md:p-14 shadow-2xl animate-in fade-in zoom-in slide-in-from-bottom-10 duration-500">
+            <div className="flex justify-between items-center mb-10">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 bg-indigo-50 rounded-2xl flex items-center justify-center text-indigo-600"><Plus size={24}/></div>
+                <h2 className="text-2xl font-black uppercase tracking-tighter">Agenda Baru</h2>
+              </div>
+              <button onClick={() => setShowAddModal(false)} className="p-3 bg-slate-50 rounded-2xl text-slate-400 hover:text-slate-800 transition-colors"><X/></button>
+            </div>
+
+            <form onSubmit={addTask}>
+              <div className="space-y-8">
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 ml-1">Nama Agenda</label>
+                  <input 
+                    autoFocus type="text" placeholder="Apa yang ingin kamu capai?"
+                    className="w-full text-3xl font-black border-none focus:ring-0 p-0 placeholder:text-slate-100 bg-transparent mt-2"
+                    value={form.text} onChange={e => setForm({...form, text: e.target.value})}
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 ml-1">Catatan Tambahan</label>
+                  <textarea 
+                    placeholder="Tulis detail atau instruksi tugas di sini..."
+                    className="w-full mt-2 bg-slate-50 border-none rounded-3xl p-6 text-sm font-medium focus:ring-2 focus:ring-indigo-100 min-h-[100px] resize-none"
+                    value={form.note} onChange={e => setForm({...form, note: e.target.value})}
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="bg-slate-50 p-6 rounded-3xl flex items-center justify-between border border-transparent focus-within:border-indigo-100">
+                    <div className="flex items-center gap-3">
+                      <Clock size={18} className="text-slate-300"/>
+                      <span className="text-xs font-bold uppercase text-slate-500">Deadline</span>
+                    </div>
+                    <input 
+                      type="datetime-local" 
+                      className="bg-transparent border-none text-[10px] font-black focus:ring-0 cursor-pointer"
+                      value={form.deadline} onChange={e => setForm({...form, deadline: e.target.value})}
+                    />
+                  </div>
+                  <button 
+                    type="button"
+                    onClick={() => setForm({...form, important: !form.important})}
+                    className={`p-6 rounded-3xl flex items-center justify-between border transition-all ${form.important ? 'bg-amber-50 border-amber-200 text-amber-600' : 'bg-slate-50 border-transparent text-slate-400'}`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <Star size={18} fill={form.important ? "currentColor" : "none"}/>
+                      <span className="text-xs font-bold uppercase">Prioritas</span>
+                    </div>
+                    <div className={`w-4 h-4 rounded-full border-2 ${form.important ? 'border-amber-600 bg-amber-600' : 'border-slate-300'}`}></div>
+                  </button>
+                </div>
+              </div>
+
+              <button type="submit" className="w-full mt-12 bg-indigo-600 text-white py-6 rounded-[2rem] font-black uppercase tracking-[0.2em] text-sm shadow-2xl shadow-indigo-200 hover:bg-indigo-700 hover:scale-[1.02] active:scale-95 transition-all">
+                Simpan Agenda Sekarang
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Helper Components
+function MenuLink({ active, icon, label, onClick }) {
+  return (
+    <button onClick={onClick} className={`w-full flex items-center gap-4 px-6 py-4 rounded-2xl transition-all ${active ? 'bg-indigo-50 text-indigo-600' : 'text-slate-400 hover:bg-slate-50 hover:text-slate-600'}`}>
+      <div className={active ? 'text-indigo-600' : 'text-slate-300'}>{icon}</div>
+      <span className="text-[11px] font-black uppercase tracking-[0.15em]">{label}</span>
+      {active && <div className="ml-auto w-1.5 h-1.5 bg-indigo-600 rounded-full"></div>}
+    </button>
+  );
+}
+
+function Tab({ active, onClick, label, count }) {
+  return (
+    <button onClick={onClick} className={`flex items-center gap-3 px-6 py-3 rounded-full whitespace-nowrap text-[10px] font-black uppercase tracking-widest transition-all
+      ${active ? 'bg-slate-900 text-white shadow-xl shadow-slate-200' : 'bg-white text-slate-400 hover:bg-slate-50'}`}>
+      {label} <span className={`px-2 py-0.5 rounded-md ${active ? 'bg-white/20' : 'bg-slate-100 text-slate-400'}`}>{count}</span>
+    </button>
+  );
+}
+
+function LogOut(props) {
+  return <svg {...props} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>;
+}
+
+```
